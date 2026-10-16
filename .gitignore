@@ -1,0 +1,33 @@
+# Environment variables
+.env
+*.env.local
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Python cache & artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Temporary directories and local media
+tmp/
+cache/
+test_media/
+
+# Node / Frontend
+node_modules/
+.next/
+out/
+build/
+dist/
+
+# OS specific
+.DS_Store
+Thumbs.db
