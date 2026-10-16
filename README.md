@@ -38,18 +38,34 @@ python -m venv .venv
 # 2. Activate the virtual environment in PowerShell
 .\.venv\Scripts\Activate.ps1
 
-# 3. Install backend dependencies
+# 3. Install backend dependencies (includes faster-whisper)
 pip install -r backend\requirements.txt
 
 # 4. Configure environment variables
-# Copy .env.example to .env if not already created
 Copy-Item .env.example .env
 ```
 
-Open `.env` and enter your OpenAI API key:
-```env
-OPENAI_API_KEY=your_actual_openai_api_key_here
-```
+#### Choose Your Transcription Provider in `.env`:
+- **Free Local Transcription (Default):**
+  Uses `faster-whisper` running directly on your CPU without any API keys or costs.
+  ```env
+  TRANSCRIBE_PROVIDER=local
+  LOCAL_WHISPER_MODEL=small
+  LOCAL_WHISPER_DEVICE=cpu
+  ```
+  *Local Model Download Sizes (downloaded once on first run from HuggingFace Hub):*
+  - `tiny`: ~75 MB (fastest, lowest accuracy)
+  - `base`: ~145 MB
+  - `small`: ~480 MB (**Default & Recommended**: good balance of accuracy for English and Hindi)
+  - `medium`: ~1.5 GB (higher accuracy for accented speech and complex Hindi/Hinglish)
+  - `large-v3`: ~3.1 GB (highest accuracy)
+
+- **OpenAI Cloud API Transcription:**
+  If you prefer to use the OpenAI Whisper API instead:
+  ```env
+  TRANSCRIBE_PROVIDER=openai
+  OPENAI_API_KEY=sk-your-openai-api-key
+  ```
 
 ---
 
@@ -67,6 +83,9 @@ $env:PYTHONPATH="backend"
 # Analyze a local video or audio file:
 python -m app.cli test_media\silent_3s.mp4
 
+# Run with --debug to see all filtered-out segments (silence, hallucinations, noise) and probability values:
+python -m app.cli "path\to\your_audio.mp3" --debug
+
 # Output raw JSON:
 python -m app.cli test_media\silent_3s.mp4 --json
 
@@ -76,7 +95,15 @@ python -m app.cli "https://www.instagram.com/reel/YOUR_REEL_ID/"
 
 ---
 
-### 4. Instagram URL Formats & Behavior
+### 4. What Voice Activity Detection (`vad_filter=True`) Does
+
+When running locally with `faster-whisper`, `vad_filter=True` activates Silero VAD (Voice Activity Detection).
+- **What it does:** Scans the audio waveform to identify segments of real human vocal speech and automatically cuts out background music, ambient silence, and noise *before* passing the audio to the Whisper model.
+- **Why it matters:** It stops Whisper from hallucinating text during silent or instrumental parts of a reel (e.g. producing random repetitive sentences) and speeds up processing time on clips with musical pauses.
+
+---
+
+### 5. Instagram URL Formats & Behavior
 
 The pipeline supports public Instagram URLs with paths starting with:
 - `/reel/` (standard Instagram reel)
@@ -88,7 +115,7 @@ The pipeline supports public Instagram URLs with paths starting with:
 
 ---
 
-### 5. Running Automated Tests
+### 6. Running Automated Tests
 
 Run the test suite using `pytest`:
 

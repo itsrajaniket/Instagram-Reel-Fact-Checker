@@ -1,9 +1,8 @@
-"""Audio transcription module using OpenAI Whisper API with hallucination and silence filtering."""
+"""Audio transcription module supporting local faster-whisper and OpenAI Whisper API."""
 
 import asyncio
 import logging
 import random
-import re
 import string
 import time
 from pathlib import Path
@@ -13,30 +12,37 @@ from openai import APIConnectionError, APITimeoutError, InternalServerError, Ope
 
 from app.config import settings
 from app.errors import InvalidInputError, NoSpeechError
-from app.models import Transcript, TranscriptSegment
+from app.models import FilteredSegment, Transcript, TranscriptSegment
 from app.pipeline.download import extract_audio_from_media
 
 logger = logging.getLogger(__name__)
 
 # Constants
-MAX_WHISPER_BYTES = 24 * 1024 * 1024  # 24 MB safety margin for 25 MB API limit
+MAX_WHISPER_BYTES = 24 * 1024 * 1024  # 24 MB safety margin for 25 MB OpenAI API limit
 MIN_SPEECH_WORDS = 5
 MAX_RETRIES = 3
 
+# Cache for local faster-whisper model instance to avoid reloading between calls
+_cached_whisper_model: Any = None
+_cached_model_key: tuple[str, str] | None = None
 
-def is_hallucination(text: str, hallucination_phrases: list[str]) -> bool:
-    """Check if the transcribed segment text matches known Whisper silence hallucinations."""
-    # Normalize text: lowercase and strip punctuation/whitespace
+
+def is_hallucination(text: str, hallucination_phrases: list[str]) -> tuple[bool, str | None]:
+    """Check if segment text matches known Whisper silence hallucinations.
+
+    Returns:
+        tuple[bool, str | None]: (is_match, matched_phrase)
+    """
     normalized = text.lower().translate(str.maketrans("", "", string.punctuation)).strip()
     if not normalized:
-        return True
+        return True, "empty after normalization"
 
     for phrase in hallucination_phrases:
         clean_phrase = phrase.lower().translate(str.maketrans("", "", string.punctuation)).strip()
         if clean_phrase and (clean_phrase in normalized or normalized == clean_phrase):
-            return True
+            return True, phrase
 
-    return False
+    return False, None
 
 
 def filter_segments(
@@ -44,15 +50,20 @@ def filter_segments(
     no_speech_threshold: float,
     logprob_threshold: float,
     hallucination_phrases: list[str],
-) -> list[TranscriptSegment]:
-    """Filter out silence, low-confidence noise, and hallucinated phrases from segments."""
-    cleaned_segments: list[TranscriptSegment] = []
+) -> tuple[list[TranscriptSegment], list[FilteredSegment]]:
+    """Filter out silence, low-confidence noise, and hallucinated phrases.
+
+    Returns:
+        tuple: (list of accepted TranscriptSegment, list of rejected FilteredSegment)
+    """
+    accepted: list[TranscriptSegment] = []
+    rejected: list[FilteredSegment] = []
 
     for seg in raw_segments:
-        # Extract attributes whether dict or Pydantic object
-        text = (getattr(seg, "text", None) or seg.get("text", "")).strip()
-        start = float(getattr(seg, "start", None) or seg.get("start", 0.0))
-        end = float(getattr(seg, "end", None) or seg.get("end", 0.0))
+        text = (getattr(seg, "text", None) or (seg.get("text") if isinstance(seg, dict) else "") or "").strip()
+        start = float(getattr(seg, "start", None) or (seg.get("start") if isinstance(seg, dict) else 0.0) or 0.0)
+        end = float(getattr(seg, "end", None) or (seg.get("end") if isinstance(seg, dict) else 0.0) or 0.0)
+
         no_speech_prob = getattr(seg, "no_speech_prob", None)
         if no_speech_prob is None and isinstance(seg, dict):
             no_speech_prob = seg.get("no_speech_prob")
@@ -61,51 +72,88 @@ def filter_segments(
         if avg_logprob is None and isinstance(seg, dict):
             avg_logprob = seg.get("avg_logprob")
 
+        nsp_float = float(no_speech_prob) if no_speech_prob is not None else None
+        logp_float = float(avg_logprob) if avg_logprob is not None else None
+
         # 1. Skip if text is empty
         if not text:
+            rejected.append(
+                FilteredSegment(
+                    start=start,
+                    end=end,
+                    text="",
+                    reason="empty text",
+                    no_speech_prob=nsp_float,
+                    avg_logprob=logp_float,
+                )
+            )
             continue
 
         # 2. Check no_speech_prob threshold
-        if no_speech_prob is not None and float(no_speech_prob) > no_speech_threshold:
-            logger.debug(
-                "Filtered segment due to no_speech_prob (%.2f > %.2f): '%s'",
-                float(no_speech_prob),
-                no_speech_threshold,
-                text,
+        if nsp_float is not None and nsp_float > no_speech_threshold:
+            reason = f"no_speech_prob ({nsp_float:.2f} > {no_speech_threshold:.2f})"
+            logger.debug("Filtered segment: '%s' [%s]", text, reason)
+            rejected.append(
+                FilteredSegment(
+                    start=start,
+                    end=end,
+                    text=text,
+                    reason=reason,
+                    no_speech_prob=nsp_float,
+                    avg_logprob=logp_float,
+                )
             )
             continue
 
         # 3. Check combined low logprob + elevated no_speech_prob
         if (
-            avg_logprob is not None
-            and float(avg_logprob) < logprob_threshold
-            and no_speech_prob is not None
-            and float(no_speech_prob) > 0.4
+            logp_float is not None
+            and logp_float < logprob_threshold
+            and nsp_float is not None
+            and nsp_float > 0.4
         ):
-            logger.debug(
-                "Filtered segment due to low logprob (%.2f < %.2f): '%s'",
-                float(avg_logprob),
-                logprob_threshold,
-                text,
+            reason = f"low logprob ({logp_float:.2f} < {logprob_threshold:.2f}) and elevated no_speech_prob ({nsp_float:.2f} > 0.40)"
+            logger.debug("Filtered segment: '%s' [%s]", text, reason)
+            rejected.append(
+                FilteredSegment(
+                    start=start,
+                    end=end,
+                    text=text,
+                    reason=reason,
+                    no_speech_prob=nsp_float,
+                    avg_logprob=logp_float,
+                )
             )
             continue
 
         # 4. Filter known silence hallucinations
-        if is_hallucination(text, hallucination_phrases):
-            logger.debug("Filtered hallucinated phrase segment: '%s'", text)
+        matched, matched_phrase = is_hallucination(text, hallucination_phrases)
+        if matched:
+            reason = f"matched hallucination phrase '{matched_phrase}'"
+            logger.debug("Filtered segment: '%s' [%s]", text, reason)
+            rejected.append(
+                FilteredSegment(
+                    start=start,
+                    end=end,
+                    text=text,
+                    reason=reason,
+                    no_speech_prob=nsp_float,
+                    avg_logprob=logp_float,
+                )
+            )
             continue
 
-        cleaned_segments.append(
+        accepted.append(
             TranscriptSegment(
                 start=start,
                 end=end,
                 text=text,
-                no_speech_prob=float(no_speech_prob) if no_speech_prob is not None else None,
-                avg_logprob=float(avg_logprob) if avg_logprob is not None else None,
+                no_speech_prob=nsp_float,
+                avg_logprob=logp_float,
             )
         )
 
-    return cleaned_segments
+    return accepted, rejected
 
 
 def ensure_size_limit(audio_path: Path) -> Path:
@@ -125,29 +173,75 @@ def ensure_size_limit(audio_path: Path) -> Path:
     return compressed_path
 
 
-def transcribe(audio_path: Path | str) -> Transcript:
-    """Transcribe an audio file using OpenAI Whisper API with retry and filtering.
+def get_local_whisper_model(model_name: str, device: str) -> Any:
+    """Retrieve or load cached local faster-whisper WhisperModel instance."""
+    global _cached_whisper_model, _cached_model_key
+    from faster_whisper import WhisperModel
 
-    Args:
-        audio_path: Path to the local MP3/audio file.
+    current_key = (model_name, device)
+    if _cached_whisper_model is None or _cached_model_key != current_key:
+        compute_type = "int8" if device.lower() == "cpu" else "default"
+        logger.info(
+            "Loading local faster-whisper model '%s' on %s (compute_type=%s)...",
+            model_name,
+            device,
+            compute_type,
+        )
+        _cached_whisper_model = WhisperModel(
+            model_size_or_path=model_name,
+            device=device,
+            compute_type=compute_type,
+        )
+        _cached_model_key = current_key
 
-    Returns:
-        Transcript: Cleaned transcript model with detected language and segments.
+    return _cached_whisper_model
 
-    Raises:
-        NoSpeechError: If speech is missing, filtered out, or under 5 words.
-        ValueError: If OPENAI_API_KEY is missing.
+
+def transcribe_local(audio_path: Path) -> tuple[str, list[Any]]:
+    """Run local transcription using faster-whisper with Silero VAD filter.
+
+    vad_filter=True uses Silero VAD to detect and remove non-speech silence before Whisper inference,
+    preventing hallucinated text on silent sections and speeding up processing.
     """
-    settings.validate_openai_key()
-    path = Path(audio_path).resolve()
-    if not path.exists():
-        raise FileNotFoundError(f"Audio file not found: {path}")
+    model = get_local_whisper_model(
+        model_name=settings.LOCAL_WHISPER_MODEL,
+        device=settings.LOCAL_WHISPER_DEVICE,
+    )
 
-    # Ensure size is within limits
-    usable_path = ensure_size_limit(path)
+    logger.info(
+        "Transcribing locally with faster-whisper ('%s' on %s, vad_filter=True)...",
+        settings.LOCAL_WHISPER_MODEL,
+        settings.LOCAL_WHISPER_DEVICE,
+    )
+
+    # vad_filter=True filters out silent/non-speech chunks before transcription
+    # language=None enables automatic language detection (e.g. Hindi, English, Hinglish)
+    segments_gen, info = model.transcribe(
+        str(audio_path),
+        vad_filter=True,
+        language=None,
+    )
+
+    raw_segments = list(segments_gen)
+    detected_language = info.language or "unknown"
+    logger.info(
+        "Local transcription complete. Detected language: '%s' (probability: %.2f), Segments: %d",
+        detected_language,
+        getattr(info, "language_probability", 0.0),
+        len(raw_segments),
+    )
+
+    return detected_language, raw_segments
+
+
+def transcribe_openai(audio_path: Path) -> tuple[str, list[Any]]:
+    """Run transcription via OpenAI Whisper API."""
+    settings.validate_openai_key()
+    usable_path = ensure_size_limit(audio_path)
     client = OpenAI(api_key=settings.OPENAI_API_KEY)
 
     last_error: Exception | None = None
+    response = None
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
@@ -173,19 +267,43 @@ def transcribe(audio_path: Path | str) -> Transcript:
             raise
 
     # Cleanup temporary compressed file if one was created
-    if usable_path != path and usable_path.exists():
+    if usable_path != audio_path and usable_path.exists():
         usable_path.unlink(missing_ok=True)
 
-    # Process segments from response
     raw_segments = getattr(response, "segments", None) or []
-    cleaned_segments = filter_segments(
+    detected_language = getattr(response, "language", None) or "unknown"
+
+    return detected_language, raw_segments
+
+
+def transcribe(audio_path: Path | str) -> Transcript:
+    """Transcribe an audio file using either local faster-whisper or OpenAI API.
+
+    Provider is controlled by TRANSCRIBE_PROVIDER ("local" or "openai").
+    Applies silence, logprob, and hallucination filtering, and validates word count.
+
+    Returns:
+        Transcript: Standardized transcript model with detected language, accepted segments, and filtered segments.
+    """
+    path = Path(audio_path).resolve()
+    if not path.exists():
+        raise FileNotFoundError(f"Audio file not found: {path}")
+
+    provider = settings.TRANSCRIBE_PROVIDER.lower()
+    if provider == "openai":
+        detected_language, raw_segments = transcribe_openai(path)
+    else:
+        detected_language, raw_segments = transcribe_local(path)
+
+    # Filter segments using shared criteria
+    accepted_segments, rejected_segments = filter_segments(
         raw_segments=raw_segments,
         no_speech_threshold=settings.NO_SPEECH_THRESHOLD,
         logprob_threshold=settings.LOGPROB_THRESHOLD,
         hallucination_phrases=settings.hallucination_phrases_list,
     )
 
-    combined_text = " ".join(seg.text for seg in cleaned_segments).strip()
+    combined_text = " ".join(seg.text for seg in accepted_segments).strip()
     words = combined_text.split()
 
     if len(words) < MIN_SPEECH_WORDS:
@@ -194,12 +312,11 @@ def transcribe(audio_path: Path | str) -> Transcript:
             "The reel may contain only background music, silence, or non-verbal sound."
         )
 
-    detected_language = getattr(response, "language", None) or "unknown"
-
     return Transcript(
         text=combined_text,
         language=detected_language,
-        segments=cleaned_segments,
+        segments=accepted_segments,
+        filtered_segments=rejected_segments,
     )
 
 

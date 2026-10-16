@@ -94,12 +94,18 @@ def test_get_audio_from_file_unsupported_extension():
 
 
 def test_whisper_hallucination_and_silence_filter():
-    """Verify hallucination and silence filtering logic."""
+    """Verify hallucination and silence filtering logic with debug tracking."""
     phrases = settings.hallucination_phrases_list
 
-    assert is_hallucination("Thank you for watching!", phrases) is True
-    assert is_hallucination("Subtitles by Amara.org", phrases) is True
-    assert is_hallucination("Important scientific announcement today.", phrases) is False
+    is_h1, phrase1 = is_hallucination("Thank you for watching!", phrases)
+    assert is_h1 is True
+    assert phrase1 is not None
+
+    is_h2, phrase2 = is_hallucination("Subtitles by Amara.org", phrases)
+    assert is_h2 is True
+
+    is_h3, _ = is_hallucination("Important scientific announcement today.", phrases)
+    assert is_h3 is False
 
     mock_segments = [
         {"text": "Thanks for watching.", "start": 0.0, "end": 1.0, "no_speech_prob": 0.05, "avg_logprob": -0.1},
@@ -114,15 +120,20 @@ def test_whisper_hallucination_and_silence_filter():
         },
     ]
 
-    filtered = filter_segments(
+    accepted, rejected = filter_segments(
         mock_segments,
         no_speech_threshold=settings.NO_SPEECH_THRESHOLD,
         logprob_threshold=settings.LOGPROB_THRESHOLD,
         hallucination_phrases=phrases,
     )
 
-    assert len(filtered) == 1
-    assert "health agency published" in filtered[0].text
+    assert len(accepted) == 1
+    assert "health agency published" in accepted[0].text
+    assert len(rejected) == 3
+    # Check that reasons are recorded
+    assert any("hallucination" in r.reason for r in rejected)
+    assert any("no_speech_prob" in r.reason for r in rejected)
+    assert any("logprob" in r.reason for r in rejected)
 
 
 def test_transcribe_no_speech_error_under_five_words():
@@ -131,16 +142,32 @@ def test_transcribe_no_speech_error_under_five_words():
         {"text": "Yes hello", "start": 0.0, "end": 1.0, "no_speech_prob": 0.05, "avg_logprob": -0.1}
     ]
 
-    filtered = filter_segments(
+    accepted, _ = filter_segments(
         mock_segments,
         no_speech_threshold=settings.NO_SPEECH_THRESHOLD,
         logprob_threshold=settings.LOGPROB_THRESHOLD,
         hallucination_phrases=settings.hallucination_phrases_list,
     )
 
-    combined_text = " ".join(s.text for s in filtered)
+    combined_text = " ".join(s.text for s in accepted)
     words = combined_text.split()
     assert len(words) < 5
+
+
+def test_openai_key_validation_conditional():
+    """Verify OPENAI_API_KEY is only required when TRANSCRIBE_PROVIDER='openai'."""
+    settings.TRANSCRIBE_PROVIDER = "local"
+    settings.OPENAI_API_KEY = ""
+    # Should not raise
+    settings.validate_openai_key()
+
+    settings.TRANSCRIBE_PROVIDER = "openai"
+    with pytest.raises(ValueError) as exc:
+        settings.validate_openai_key()
+    assert "OPENAI_API_KEY is missing" in str(exc.value)
+
+    # Restore local provider default
+    settings.TRANSCRIBE_PROVIDER = "local"
 
 
 @patch("app.pipeline.run.transcribe")

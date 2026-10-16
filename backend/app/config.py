@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from typing import Literal
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -15,6 +16,13 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    # Transcription Provider: "local" (free faster-whisper) or "openai" (Whisper API)
+    TRANSCRIBE_PROVIDER: Literal["local", "openai"] = "local"
+
+    # Local Whisper Settings
+    LOCAL_WHISPER_MODEL: str = "small"
+    LOCAL_WHISPER_DEVICE: str = "cpu"
+
     # API Keys
     OPENAI_API_KEY: str = Field(default="")
     GEMINI_API_KEY: str = Field(default="")
@@ -23,10 +31,14 @@ class Settings(BaseSettings):
     GEMINI_MODEL: str = "gemini-2.5-flash"
     WHISPER_MODEL: str = "whisper-1"
 
-    # Limits
+    # Limits (MAX_CLAIMS default 4 to protect free tier rate limits)
     MAX_DURATION_SECONDS: int = 180
     MAX_UPLOAD_MB: int = 50
-    MAX_CLAIMS: int = 8
+    MAX_CLAIMS: int = 4
+
+    # Estimated Gemini Pricing (for cost tracking)
+    GEMINI_INPUT_PRICE_PER_M_TOKENS: float = 0.075
+    GEMINI_OUTPUT_PRICE_PER_M_TOKENS: float = 0.30
 
     # Paths
     TEMP_DIR: Path = Path("./tmp")
@@ -65,10 +77,19 @@ class Settings(BaseSettings):
         self.CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
     def validate_openai_key(self) -> None:
-        """Verify that OPENAI_API_KEY is present for transcription."""
-        if not self.OPENAI_API_KEY or not self.OPENAI_API_KEY.strip():
+        """Verify that OPENAI_API_KEY is present when OpenAI transcription provider is selected."""
+        if self.TRANSCRIBE_PROVIDER == "openai":
+            if not self.OPENAI_API_KEY or not self.OPENAI_API_KEY.strip():
+                raise ValueError(
+                    "OPENAI_API_KEY is missing or empty. Please set it in your .env file "
+                    "or change TRANSCRIBE_PROVIDER=local for free local transcription."
+                )
+
+    def validate_gemini_key(self) -> None:
+        """Verify that GEMINI_API_KEY is present for Phase 2 analysis."""
+        if not self.GEMINI_API_KEY or not self.GEMINI_API_KEY.strip():
             raise ValueError(
-                "OPENAI_API_KEY is missing or empty. Please set it in your .env file."
+                "GEMINI_API_KEY is missing or empty. Please set it in your .env file."
             )
 
 

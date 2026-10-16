@@ -1,10 +1,11 @@
-"""Pipeline orchestration for audio extraction and transcription."""
+"""Pipeline orchestration for audio extraction, transcription, and Gemini analysis."""
 
 import asyncio
 import logging
 from pathlib import Path
 
-from app.models import ReelMetadata, Transcript
+from app.models import AnalysisResult, ReelMetadata, Transcript
+from app.pipeline.analyze import GeminiClient, analyze_reel, analyze_reel_async
 from app.pipeline.download import get_audio, get_audio_from_file
 from app.pipeline.transcribe import transcribe
 
@@ -18,7 +19,7 @@ def is_url(source: str) -> bool:
 
 
 def get_transcript(source: str) -> tuple[Transcript, ReelMetadata]:
-    """Execute the pipeline: source -> audio extraction -> transcription.
+    """Execute the data pipeline: source -> audio extraction -> transcription.
 
     Always cleans up temporary audio files in a finally block.
 
@@ -55,3 +56,23 @@ def get_transcript(source: str) -> tuple[Transcript, ReelMetadata]:
 async def async_get_transcript(source: str) -> tuple[Transcript, ReelMetadata]:
     """Asynchronously execute audio extraction and transcription in a separate thread."""
     return await asyncio.to_thread(get_transcript, source)
+
+
+def run_full_pipeline(source: str, client: GeminiClient | None = None) -> AnalysisResult:
+    """Execute complete end-to-end pipeline: media extraction -> transcription -> 3-step fact check.
+
+    Args:
+        source: Instagram URL or local media file path.
+        client: Optional pre-configured GeminiClient.
+
+    Returns:
+        AnalysisResult: Full orchestrated fact-check report.
+    """
+    transcript, metadata = get_transcript(source)
+    return analyze_reel(transcript=transcript, metadata=metadata, client=client)
+
+
+async def async_run_full_pipeline(source: str, client: GeminiClient | None = None) -> AnalysisResult:
+    """Asynchronously execute full pipeline for FastAPI endpoints."""
+    transcript, metadata = await async_get_transcript(source)
+    return await analyze_reel_async(transcript=transcript, metadata=metadata, client=client)

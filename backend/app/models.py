@@ -24,12 +24,24 @@ class TranscriptSegment(BaseModel):
     avg_logprob: float | None = None
 
 
+class FilteredSegment(BaseModel):
+    """A discarded segment filtered out during silence, noise, or hallucination checks."""
+
+    start: float
+    end: float
+    text: str
+    reason: str
+    no_speech_prob: float | None = None
+    avg_logprob: float | None = None
+
+
 class Transcript(BaseModel):
     """Complete transcript with detected language and segments."""
 
     text: str
     language: str
     segments: list[TranscriptSegment] = Field(default_factory=list)
+    filtered_segments: list[FilteredSegment] = Field(default_factory=list)
 
 
 class Claim(BaseModel):
