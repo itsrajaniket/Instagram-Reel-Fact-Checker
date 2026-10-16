@@ -34,8 +34,8 @@ def test_usage_tracker_and_cost_estimation():
     assert tracker.total_tokens == 4500
     assert tracker.search_queries == 3
     assert tracker.api_calls == 2
-    # Cost = (3000 / 1e6 * 0.075) + (1500 / 1e6 * 0.30) = 0.000225 + 0.000450 = 0.000675
-    assert tracker.estimated_cost_usd == pytest.approx(0.000675, rel=1e-4)
+    # Cost = (3000 / 1e6 * 0.30) + (1500 / 1e6 * 2.50) + (3 / 1000 * 14.00) = 0.0009 + 0.00375 + 0.042 = 0.04665
+    assert tracker.estimated_cost_usd == pytest.approx(0.04665, rel=1e-4)
 
 
 def test_truncate_to_sentences():
@@ -173,3 +173,21 @@ def test_step_a_retry_on_invalid_json():
 
     assert extraction.tone == "news"
     assert mock_client.generate.call_count == 2
+
+
+@patch("app.pipeline.run.analyze_reel")
+def test_analyze_text(mock_analyze_reel):
+    """Verify analyze_text creates synthetic transcript and metadata."""
+    from app.pipeline.run import analyze_text
+    from app.errors import InvalidInputError
+
+    mock_analyze_reel.return_value = MagicMock()
+    analyze_text("Drinking eight glasses of water daily improves kidney function.")
+    assert mock_analyze_reel.call_count == 1
+    call_args = mock_analyze_reel.call_args[1]
+    assert "Drinking eight glasses" in call_args["transcript"].text
+    assert call_args["metadata"].source_url == "text-input"
+
+    # Empty text raises InvalidInputError
+    with pytest.raises(InvalidInputError):
+        analyze_text("   ")

@@ -4,7 +4,7 @@ import asyncio
 import logging
 from pathlib import Path
 
-from app.models import AnalysisResult, ReelMetadata, Transcript
+from app.models import AnalysisResult, ReelMetadata, Transcript, TranscriptSegment
 from app.pipeline.analyze import GeminiClient, analyze_reel, analyze_reel_async
 from app.pipeline.download import get_audio, get_audio_from_file
 from app.pipeline.transcribe import transcribe
@@ -76,3 +76,42 @@ async def async_run_full_pipeline(source: str, client: GeminiClient | None = Non
     """Asynchronously execute full pipeline for FastAPI endpoints."""
     transcript, metadata = await async_get_transcript(source)
     return await analyze_reel_async(transcript=transcript, metadata=metadata, client=client)
+
+
+def analyze_text(text: str, client: GeminiClient | None = None) -> AnalysisResult:
+    """Directly analyze and fact-check a raw text string without requiring audio media.
+
+    Args:
+        text: Text statement or video transcript.
+        client: Optional pre-configured GeminiClient.
+
+    Returns:
+        AnalysisResult: Full orchestrated fact-check report.
+    """
+    clean_text = text.strip()
+    if not clean_text:
+        from app.errors import InvalidInputError
+        raise InvalidInputError("Text input cannot be empty.")
+
+    words = clean_text.split()
+    estimated_duration = max(3.0, round(len(words) / 2.5, 1))
+
+    transcript = Transcript(
+        text=clean_text,
+        language="en",
+        segments=[
+            TranscriptSegment(
+                start=0.0,
+                end=estimated_duration,
+                text=clean_text,
+            )
+        ],
+    )
+    metadata = ReelMetadata(
+        source_url="text-input",
+        caption=None,
+        creator="Direct Text Input",
+        upload_date=None,
+        duration_seconds=estimated_duration,
+    )
+    return analyze_reel(transcript=transcript, metadata=metadata, client=client)

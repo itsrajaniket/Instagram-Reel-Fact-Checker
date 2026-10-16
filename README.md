@@ -80,17 +80,26 @@ Execute the CLI from the project root using PowerShell:
 # Set PYTHONPATH to the backend folder
 $env:PYTHONPATH="backend"
 
-# Analyze a local video or audio file:
+# 1. Fact-check typed text directly (no media file needed):
+python -m app.cli --text "Drinking raw onion juice cures cancer in 48 hours."
+
+# 2. Fact-check a transcript from a text file:
+python -m app.cli --text-file "path\to\transcript.txt"
+
+# 3. Analyze a local video or audio file:
 python -m app.cli test_media\silent_3s.mp4
 
-# Run with --debug to see all filtered-out segments (silence, hallucinations, noise) and probability values:
+# 4. Run with --debug to see all filtered-out segments (silence, hallucinations, noise) and probability values:
 python -m app.cli "path\to\your_audio.mp3" --debug
 
-# Output raw JSON:
-python -m app.cli test_media\silent_3s.mp4 --json
+# 5. Output raw JSON:
+python -m app.cli --text "Your text statement" --json
 
-# Analyze an Instagram Reel link:
+# 6. Analyze an Instagram Reel link:
 python -m app.cli "https://www.instagram.com/reel/YOUR_REEL_ID/"
+
+# 7. Extract transcript only without calling Gemini:
+python -m app.cli "path\to\clip.mp4" --transcript-only
 ```
 
 ---

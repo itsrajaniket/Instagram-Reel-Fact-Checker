@@ -36,9 +36,10 @@ class Settings(BaseSettings):
     MAX_UPLOAD_MB: int = 50
     MAX_CLAIMS: int = 4
 
-    # Estimated Gemini Pricing (for cost tracking)
-    GEMINI_INPUT_PRICE_PER_M_TOKENS: float = 0.075
-    GEMINI_OUTPUT_PRICE_PER_M_TOKENS: float = 0.30
+    # Estimated Gemini 2.5 Flash Pricing (for approximate cost tracking)
+    GEMINI_INPUT_PRICE_PER_M_TOKENS: float = 0.30
+    GEMINI_OUTPUT_PRICE_PER_M_TOKENS: float = 2.50
+    GEMINI_SEARCH_PRICE_PER_K_QUERIES: float = 14.00
 
     # Paths
     TEMP_DIR: Path = Path("./tmp")

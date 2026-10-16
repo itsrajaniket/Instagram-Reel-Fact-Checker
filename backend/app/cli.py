@@ -8,8 +8,8 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from app.errors import ReelCheckerError
-from app.pipeline.run import get_transcript, run_full_pipeline
+from app.errors import InvalidInputError, ReelCheckerError
+from app.pipeline.run import analyze_text, get_transcript, run_full_pipeline
 
 # Configure root logging for CLI: warnings/errors by default unless verbose/debug
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
@@ -45,7 +45,22 @@ def main() -> None:
     )
     parser.add_argument(
         "source",
-        help="Instagram reel URL (e.g. https://www.instagram.com/reel/...) or path to local media file (mp4, mov, mp3, m4a, wav)",
+        nargs="?",
+        default=None,
+        help="Instagram reel URL or path to local media file (optional if --text or --text-file is provided)",
+    )
+    parser.add_argument(
+        "-t",
+        "--text",
+        type=str,
+        default=None,
+        help="Directly fact-check a typed text statement or transcript without requiring an audio/video file",
+    )
+    parser.add_argument(
+        "--text-file",
+        type=str,
+        default=None,
+        help="Fact-check a transcript read directly from a local .txt file",
     )
     parser.add_argument(
         "--transcript-only",
@@ -110,9 +125,24 @@ def main() -> None:
             console.print(Panel(transcript.text, title="[bold]Full Text[/bold]", border_style="green"))
             sys.exit(0)
 
-        # Full Phase 2 Analysis Pipeline
-        console.print("[dim cyan]Running end-to-end fact check pipeline...[/dim cyan]")
-        analysis = run_full_pipeline(args.source)
+        # Determine input mode
+        if args.text:
+            console.print("[dim cyan]Running fact check on direct text input...[/dim cyan]")
+            analysis = analyze_text(args.text)
+        elif args.text_file:
+            from pathlib import Path
+            text_path = Path(args.text_file).resolve()
+            if not text_path.exists():
+                raise InvalidInputError(f"Transcript text file not found: {text_path}")
+            console.print(f"[dim cyan]Running fact check on transcript file: {text_path.name}...[/dim cyan]")
+            analysis = analyze_text(text_path.read_text(encoding="utf-8"))
+        elif args.source:
+            console.print("[dim cyan]Running end-to-end fact check pipeline...[/dim cyan]")
+            analysis = run_full_pipeline(args.source)
+        else:
+            raise InvalidInputError(
+                "Please provide a media source URL/file, or pass --text \"...\", or pass --text-file <path>."
+            )
 
         if args.json:
             print(json.dumps(analysis.model_dump(), indent=2, ensure_ascii=False))
@@ -200,7 +230,7 @@ def main() -> None:
         # Usage & Cost Stats
         cost_str = f"${analysis.cost_estimate_usd:.6f}" if analysis.cost_estimate_usd is not None else "N/A"
         console.print(
-            f"[dim]Runtime: {analysis.runtime_seconds}s | Est. Cost: {cost_str}[/dim]"
+            f"[dim]Runtime: {analysis.runtime_seconds}s | Est. Paid Value: ~{cost_str} (Approximate; Free-Tier usage costs $0.00)[/dim]"
         )
 
         # Mandatory Disclaimer

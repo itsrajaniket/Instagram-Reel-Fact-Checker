@@ -54,10 +54,11 @@ class UsageTracker:
 
     @property
     def estimated_cost_usd(self) -> float:
-        """Estimate total cost in USD based on Gemini 2.5 Flash token rates."""
+        """Estimate total cost in USD based on official Gemini 2.5 Flash token and search rates."""
         input_cost = (self.prompt_tokens / 1_000_000.0) * settings.GEMINI_INPUT_PRICE_PER_M_TOKENS
         output_cost = (self.candidates_tokens / 1_000_000.0) * settings.GEMINI_OUTPUT_PRICE_PER_M_TOKENS
-        return round(input_cost + output_cost, 6)
+        search_cost = (self.search_queries / 1_000.0) * settings.GEMINI_SEARCH_PRICE_PER_K_QUERIES
+        return round(input_cost + output_cost + search_cost, 6)
 
 
 class ClaimVerdictRaw(BaseModel):
